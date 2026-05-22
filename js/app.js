@@ -3,6 +3,38 @@
 const API_BASE = "https://ebt-rmp-api-production.up.railway.app";
 const PAGE_SIZE = 1000;
 
+// The API does not send CORS headers, so browser fetches are blocked.
+// Requests are routed through a public CORS proxy. The first proxy that
+// answers is reused for every subsequent page.
+const CORS_PROXIES = [
+  (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+];
+
+let activeProxy = null;
+
+async function fetchJson(apiUrl) {
+  if (activeProxy) {
+    const res = await fetch(activeProxy(apiUrl));
+    if (!res.ok) throw new Error(`API responded ${res.status}`);
+    return res.json();
+  }
+
+  let lastErr;
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const res = await fetch(proxy(apiUrl));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      activeProxy = proxy;
+      return data;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("all CORS proxies failed");
+}
+
 const statusEl = document.getElementById("status");
 
 const map = L.map("map", { center: [37.5, -119], zoom: 5 });
@@ -78,10 +110,7 @@ async function loadStores() {
   try {
     while (offset < total) {
       const url = `${API_BASE}/stores?limit=${PAGE_SIZE}&offset=${offset}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`API responded ${res.status}`);
-
-      const data = await res.json();
+      const data = await fetchJson(url);
       const items = Array.isArray(data.items) ? data.items : [];
       total = Number.isFinite(data.total) ? data.total : offset + items.length;
       const pageLimit = data.limit > 0 ? data.limit : PAGE_SIZE;
