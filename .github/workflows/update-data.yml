@@ -1,0 +1,79 @@
+name: Update store data snapshot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * *"
+  push:
+    branches:
+      - claude/github-pages-map-deploy-IL5Mq
+    paths:
+      - ".github/workflows/update-data.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch stores from API
+        run: |
+          set -euo pipefail
+          API="https://ebt-rmp-api-production.up.railway.app/stores"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+          LIMIT=1000
+          offset=0
+          total=1
+          page=0
+          rm -rf /tmp/pages && mkdir -p /tmp/pages data
+
+          while [ "$offset" -lt "$total" ] && [ "$page" -lt 500 ]; do
+            resp=$(curl -sS -A "$UA" -H "Accept: application/json" \
+              -w $'\n%{http_code}' "$API?limit=$LIMIT&offset=$offset")
+            code=$(printf '%s' "$resp" | tail -n1)
+            body=$(printf '%s' "$resp" | sed '$d')
+
+            if [ "$code" != "200" ]; then
+              echo "::error::API returned HTTP $code at offset $offset"
+              printf '%s\n' "$body" | head -c 500
+              exit 1
+            fi
+
+            total=$(printf '%s' "$body" | jq '.total // 0')
+            count=$(printf '%s' "$body" | jq '.items | length')
+            printf '%s' "$body" | jq '.items' > "/tmp/pages/page_$page.json"
+            echo "page $page: offset=$offset count=$count total=$total"
+
+            [ "$count" -eq 0 ] && break
+            offset=$((offset + count))
+            page=$((page + 1))
+          done
+
+          jq -s 'add
+            | map(select(.latitude != null and .longitude != null))
+            | map({record_id, store_name, store_type, store_street_address,
+                   additional_address, city, state, zip_code, county,
+                   incentive_program, grantee_name, latitude, longitude})' \
+            /tmp/pages/page_*.json > data/stores.json
+
+          echo "Snapshot contains $(jq length data/stores.json) mappable stores"
+
+      - name: Commit snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/stores.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update store data snapshot"
+            git push
+          fi
